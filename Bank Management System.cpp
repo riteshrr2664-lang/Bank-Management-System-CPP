@@ -8,6 +8,8 @@
 #include<iomanip>
 #include<cctype>
 #include<cerrno>
+#include<cstring>
+#include<cstdio>
 #include<functional>
 #include<chrono>
 #include<ctime>
@@ -19,7 +21,6 @@
 #include <sys/types.h>
 #endif
 using namespace std;
-
 
 // ── Colour helpers ──────────────────────────────────────────────
 void red()    { cout << "\033[1;31m"; }
@@ -33,13 +34,8 @@ class BankAccount {
 private:
     static const string bankname;
     static const string bankprefix;   // prefix for account numbers  (was "bankcode")
-    static const string accountsDir;
-    static constexpr double MIN_BALANCE = 500.0;
-    static constexpr int COUNTER_START = 1000;
-    static constexpr int PASSWORD_MIN_LENGTH = 8;
-    static constexpr int MAX_LOGIN_ATTEMPTS = 3;
-    static constexpr double DEFAULT_INTEREST_RATE = 3.5;
-    static constexpr int MAX_INTEREST_YEARS = 10;
+    static const double MIN_BALANCE;
+    static const int COUNTER_START;
 
     string accountholdername;
     string accountnumber;
@@ -50,6 +46,13 @@ private:
     vector<string> transactionhistory;
 
 public:
+    static string accountsDir;
+    static const string DEFAULT_ACCOUNTS_DIR;
+    static const int PASSWORD_MIN_LENGTH;
+    static const int MAX_LOGIN_ATTEMPTS;
+    static const double DEFAULT_INTEREST_RATE;
+    static const int MAX_INTEREST_YEARS;
+
     BankAccount();
     void savetofile();
     bool loadfromfile();
@@ -121,7 +124,11 @@ static string currentDateTime()
     time_t t = chrono::system_clock::to_time_t(now);
     tm localTime;
 #ifdef _WIN32
-    localtime_s(&localTime, &t);
+    tm *timePtr = localtime(&t);
+    if (timePtr != nullptr)
+        localTime = *timePtr;
+    else
+        localTime = tm();
 #else
     localtime_r(&t, &localTime);
 #endif
@@ -158,7 +165,7 @@ static string readPassword(const string& prompt)
 {
     cout << prompt;
     string password;
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(__MINGW32__)
     int ch;
     while ((ch = _getch()) != '\r' && ch != '\n') {
         if (ch == 8) {
@@ -205,22 +212,92 @@ static double calculateInterestAmount(double principal, double annualRate, int y
     return principal * annualRate / 100.0 * years;
 }
 
-void ensure_accounts_dir()
+static string getDefaultAccountsDir()
 {
+    const char* home = nullptr;
 #ifdef _WIN32
-        _mkdir(BankAccount::accountsDir.c_str());
+    home = getenv("USERPROFILE");
 #else
-        mkdir(BankAccount::accountsDir.c_str(), 0755);
+    home = getenv("HOME");
 #endif
+    if (home && *home) {
+        return string(home) + "/Accounts";
+    }
+    return string("Accounts");
 }
+
+bool ensure_accounts_dir()
+{
+    errno = 0;
+#ifdef _WIN32
+    int result = _mkdir(BankAccount::accountsDir.c_str());
+#else
+    int result = mkdir(BankAccount::accountsDir.c_str(), 0755);
+#endif
+
+    if (result != 0 && errno != EEXIST) {
+        // Fall back to a writable folder in the user's home directory.
+        string fallback = getDefaultAccountsDir();
+        if (fallback != BankAccount::accountsDir) {
+            yellow();
+            cout << "WARNING: Could not create '" << BankAccount::accountsDir << "' directory.\n";
+            cout << "  Reason: " << strerror(errno) << "\n";
+            cout << "  Falling back to '" << fallback << "'.\n";
+            white();
+            BankAccount::accountsDir = fallback;
+#ifdef _WIN32
+            result = _mkdir(BankAccount::accountsDir.c_str());
+#else
+            result = mkdir(BankAccount::accountsDir.c_str(), 0755);
+#endif
+        }
+    }
+
+    if (result != 0 && errno != EEXIST) {
+        red();
+        cout << "ERROR: Could not create '" << BankAccount::accountsDir << "' directory.\n";
+        cout << "  Reason: " << strerror(errno) << "\n";
+        cout << "  Please run this program from a folder you have write access to.\n";
+        white();
+        return false;
+    }
+
+    string testFile = BankAccount::accountsDir + "/.write_test";
+    ofstream test(testFile);
+    if (!test) {
+        // If the fallback path is not writable either, report a clear error.
+        red();
+        cout << "ERROR: '" << BankAccount::accountsDir << "' exists but is not writable.\n";
+        cout << "  Please check the folder's permissions and try again.\n";
+        white();
+        return false;
+    }
+    test.close();
+    remove(testFile.c_str());
+
+    return true;
+}
+
 const string BankAccount::bankname   = "ABC Bank";
 const string BankAccount::bankprefix = "ABC";
-const string BankAccount::accountsDir = "Accounts";
+string BankAccount::accountsDir = "Accounts";
+const string BankAccount::DEFAULT_ACCOUNTS_DIR = "Accounts";
+const double BankAccount::MIN_BALANCE = 500.0;
+const int BankAccount::COUNTER_START = 1000;
+const int BankAccount::PASSWORD_MIN_LENGTH = 8;
+const int BankAccount::MAX_LOGIN_ATTEMPTS = 3;
+const double BankAccount::DEFAULT_INTEREST_RATE = 3.5;
+const int BankAccount::MAX_INTEREST_YEARS = 10;
+
+BankAccount::BankAccount() : balance(0.0)
+{
+}
 
 //to save user data in file 
 void BankAccount::savetofile()
 {
-    ensure_accounts_dir();
+    if (!ensure_accounts_dir())
+        return;
 
     string filename = accountsDir + "/" + accountnumber + ".txt";
 
@@ -313,7 +390,8 @@ void BankAccount::mainmenu() {
             white();
             continue;
         }
-        system("cls");
+        (void)choice; // Keep compiler warnings quiet in browser compilers
+    cout << "\n";
 
         switch (choice) {
             case 1: depositmoney();        break;
@@ -344,7 +422,12 @@ void BankAccount::createaccount()
     cout << "-----------------------------\n";
     white();
 
-    cin.ignore(numeric_limits<streamsize>::max(), '\n');
+    // Verify the Accounts folder is usable BEFORE collecting any input,
+    // so the user doesn't type everything out only to lose it to a
+    // directory error at the end.
+    if (!ensure_accounts_dir())
+        return;
+
     do {
         cout << "Enter your full name : ";
         getline(cin, accountholdername);
@@ -393,8 +476,6 @@ void BankAccount::createaccount()
         break;
     } while (true);
     accountpassword = hashPassword(rawPassword);
-
-    ensure_accounts_dir();
 
     int counter = COUNTER_START;
     ifstream counterIn(accountsDir + "/counter.txt");
@@ -647,7 +728,7 @@ int main() {
         white();
         return 0;
     }
-    system("cls");
+    cout << "\n";
 
     switch (choice) {
         case 1:
